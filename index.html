@@ -1,0 +1,1843 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ResQHub - Disaster Management Platform</title>
+
+    <!-- Fonts: Inter for minimal, clean startup look -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Leaflet CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-app.js";
+        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-auth.js";
+        import { getFirestore, collection, addDoc, getDocs, onSnapshot, query, orderBy, limit } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-firestore.js";
+        import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-storage.js";
+        import { getMessaging, getToken, onMessage } from "https://www.gstatic.com/firebasejs/10.9.0/firebase-messaging.js";
+
+        window.FirebaseSDK = {
+            initializeApp, getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged,
+            getFirestore, collection, addDoc, getDocs, onSnapshot, query, orderBy, limit,
+            getStorage, ref, uploadBytes, getDownloadURL,
+            getMessaging, getToken, onMessage
+        };
+
+        window.initFirebase = (config) => {
+            window.app = window.FirebaseSDK.initializeApp(config);
+            window.auth = window.FirebaseSDK.getAuth(window.app);
+            window.db = window.FirebaseSDK.getFirestore(window.app);
+            window.storage = window.FirebaseSDK.getStorage(window.app);
+            window.messaging = window.FirebaseSDK.getMessaging(window.app);
+        };
+
+        window.firebaseMock = {
+            login: async (email, pass) => {
+                const cred = await window.FirebaseSDK.signInWithEmailAndPassword(window.auth, email, pass);
+                const loginData = {
+                    name: cred.user.displayName || email.split('@')[0],
+                    email: cred.user.email,
+                    loginTime: Date.now(),
+                    device: navigator.userAgent,
+                    location: 'Unknown',
+                    ip: 'Unknown'
+                };
+                await window.FirebaseSDK.addDoc(window.FirebaseSDK.collection(window.db, 'user_logins'), loginData);
+                return cred;
+            },
+            googleLogin: async () => {
+                const provider = new window.FirebaseSDK.GoogleAuthProvider();
+                const cred = await window.FirebaseSDK.signInWithPopup(window.auth, provider);
+                const loginData = {
+                    name: cred.user.displayName,
+                    email: cred.user.email,
+                    loginTime: Date.now(),
+                    device: navigator.userAgent,
+                    location: 'Unknown',
+                    ip: 'Unknown'
+                };
+                await window.FirebaseSDK.addDoc(window.FirebaseSDK.collection(window.db, 'user_logins'), loginData);
+                return cred;
+            },
+            uploadFile: async (file) => {
+                if(!file) return "";
+                const storageRef = window.FirebaseSDK.ref(window.storage, `avatars/${window.auth.currentUser.uid}_${Date.now()}`);
+                await window.FirebaseSDK.uploadBytes(storageRef, file);
+                return await window.FirebaseSDK.getDownloadURL(storageRef);
+            },
+            updateUserProfileImage: async (url) => {
+                // To keep it simple, we just rely on standard Firebase Auth profile update or ignore it inside the mock wrapper since the UI handles preview state.
+                return url; 
+            },
+            syncOfflineQueue: async () => {
+                const queue = JSON.parse(localStorage.getItem('safelink_offline_queue')) || [];
+                if (queue.length === 0) return 0;
+                let count = 0;
+                for (const alertData of queue) {
+                    delete alertData._isOfflineQueued;
+                    delete alertData._queuedAt;
+                    await window.firebaseMock.createAlert(alertData, true);
+                    count++;
+                }
+                localStorage.removeItem('safelink_offline_queue');
+                return count;
+            },
+            createAlert: async (alertData, isSyncing = false) => {
+                if (!navigator.onLine && !isSyncing) {
+                    const queue = JSON.parse(localStorage.getItem('safelink_offline_queue')) || [];
+                    queue.push({ ...alertData, _queuedAt: Date.now() });
+                    localStorage.setItem('safelink_offline_queue', JSON.stringify(queue));
+                    return { id: 'QUEUED', ...alertData, _isOfflineQueued: true };
+                }
+                const dataToSave = {
+                    userId: window.auth && window.auth.currentUser ? window.auth.currentUser.uid : 'anon',
+                    status: 'Active',
+                    timestamp: Date.now(),
+                    ...alertData
+                };
+                const docRef = await window.FirebaseSDK.addDoc(window.FirebaseSDK.collection(window.db, 'alerts'), dataToSave);
+                return { id: docRef.id, ...dataToSave };
+            },
+            getEmergencyContacts: async () => {
+                return []; // Needs where query, simplified for now
+            },
+            addEmergencyContact: async (contact) => {
+                const dataToSave = { userId: window.auth.currentUser.uid, ...contact };
+                const docRef = await window.FirebaseSDK.addDoc(window.FirebaseSDK.collection(window.db, 'emergency_contacts'), dataToSave);
+                return { id: docRef.id, ...dataToSave };
+            },
+            deleteEmergencyContact: async (id) => {
+                return true;
+            },
+            getUserLogins: async () => {
+                const q = window.FirebaseSDK.query(window.FirebaseSDK.collection(window.db, 'user_logins'), window.FirebaseSDK.orderBy('loginTime', 'desc'), window.FirebaseSDK.limit(100));
+                const snap = await window.FirebaseSDK.getDocs(q);
+                return snap.docs.map(doc => ({id: doc.id, ...doc.data()}));
+            },
+            subscribeToAlerts: (callback) => {
+                const q = window.FirebaseSDK.query(window.FirebaseSDK.collection(window.db, 'alerts'), window.FirebaseSDK.orderBy('timestamp', 'desc'));
+                return window.FirebaseSDK.onSnapshot(q, (snapshot) => {
+                    callback(snapshot.docs.map(doc => ({id: doc.id, ...doc.data()})));
+                }, (error) => console.log(error));
+            },
+            subscribeToNotifications: (callback) => {
+                return () => {}; // Dummy implementation since FCM requires service workers
+            },
+            requestNotificationPermission: () => new Promise(resolve => {
+                setTimeout(() => resolve('granted'), 500);
+            })
+        };
+    </script>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Tailwind Config -->
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                    colors: {
+                        neutral: {
+                            850: '#1f1f22',
+                            900: '#171717',
+                            950: '#0a0a0a',
+                        },
+                        primary: {
+                            400: '#2dd4bf', // Teal 400
+                            500: '#14b8a6', // Teal 500
+                            600: '#0d9488', // Teal 600
+                        },
+                        danger: {
+                            500: '#ef4444',
+                            600: '#dc2626',
+                        }
+                    },
+                    animation: {
+                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Custom Utilities -->
+    <style>
+        body {
+            background-color: #0a0a0a;
+            color: #ededed;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        /* Minimal Scrollbar */
+        ::-webkit-scrollbar {
+            width: 4px;
+            height: 4px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #262626;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #404040;
+        }
+
+        /* Glass / Blurs */
+        .glass-nav {
+            background: rgba(10, 10, 10, 0.7);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .card {
+            background-color: #171717;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+        }
+
+        .dropdown-shadow {
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+        }
+
+        .pulse-ring {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: 50%;
+            border: 2px solid rgba(239, 68, 68, 0.5);
+            animation: pulse-ring 2s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+        }
+
+        @keyframes pulse-ring {
+            0% {
+                transform: scale(1);
+                opacity: 1;
+            }
+
+            100% {
+                transform: scale(1.5);
+                opacity: 0;
+            }
+        }
+
+        /* Leaflet Dark Mode Overrides */
+        .leaflet-container {
+            background-color: #0a0a0a !important;
+            font-family: 'Inter', sans-serif !important;
+        }
+
+        .leaflet-layer,
+        .leaflet-control-zoom-in,
+        .leaflet-control-zoom-out,
+        .leaflet-control-attribution {
+            filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%);
+        }
+
+        .leaflet-popup-content-wrapper,
+        .leaflet-popup-tip {
+            background-color: #171717 !important;
+            color: #ededed !important;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+        }
+
+        .leaflet-popup-content p {
+            margin: 4px 0;
+            color: #a3a3a3;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // Icons
+        const Icons = {
+            Logo: () => (
+                <svg className="w-8 h-8 text-primary-500" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="2" y="2" width="36" height="36" rx="8" fill="currentColor" fillOpacity="0.1" stroke="currentColor" strokeWidth="2"/>
+                    <path d="M20 10v20M10 20h20" stroke="currentColor" strokeWidth="4" strokeLinecap="round"/>
+                    <circle cx="20" cy="20" r="14" stroke="currentColor" strokeWidth="2" strokeDasharray="4 4" className="animate-[spin_10s_linear_infinite] origin-center"/>
+                </svg>
+            ),
+            Home: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" /></svg>,
+            Map: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" /></svg>,
+            Briefcase: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>,
+            Users: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" /></svg>,
+            Settings: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>,
+            Bell: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" /></svg>,
+            Search: () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>,
+            ChevronRight: () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>,
+            Plus: () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>,
+            Upload: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>,
+            X: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M6 18L18 6M6 6l12 12" /></svg>,
+            Image: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>,
+            Camera: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" /></svg>,
+            Sparkles: ({ className }) => <svg className={className || "w-5 h-5"} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" /></svg>,
+            Shield: () => <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg>,
+        };
+
+        // --- COMPONENTS ---
+
+        // 0. AI Chatbot
+        const AIChatbot = () => {
+            const [isOpen, setIsOpen] = useState(false);
+            const [isHovered, setIsHovered] = useState(false);
+            const [messages, setMessages] = useState([
+                { role: 'assistant', content: 'Hello! I am your ResQHub AI Emergency Assistant. I can help with disaster safety, first aid guidance, and finding nearby shelters.' }
+            ]);
+            const [input, setInput] = useState('');
+            const [loading, setLoading] = useState(false);
+            const messagesEndRef = useRef(null);
+
+            const scrollToBottom = () => {
+                messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            };
+
+            useEffect(() => {
+                if (isOpen) scrollToBottom();
+            }, [messages, isOpen]);
+
+            const handleSend = async (e) => {
+                e.preventDefault();
+                const currentApiKey = window.openAiKey || localStorage.getItem('safelink_openai');
+                if (!input.trim() || !currentApiKey) {
+                    if (!currentApiKey) setMessages(prev => [...prev, { role: 'assistant', content: `Error: OpenAI API Key is missing. Please restart the app configuration.` }]);
+                    return;
+                }
+
+                const userMsg = { role: 'user', content: input };
+                setMessages(prev => [...prev, userMsg]);
+                setInput('');
+                setLoading(true);
+
+                try {
+                    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${currentApiKey}`
+                        },
+                        body: JSON.stringify({
+                            model: 'gpt-3.5-turbo',
+                            messages: [
+                                { role: 'system', content: 'You are the ResQHub AI Emergency Assistant. Your role is to provide quick, accurate, and concise disaster safety advice, first aid guidance, and suggest general steps for finding shelters or hospitals. Always advise users to contact local emergency services for immediate life-threatening situations. Format your responses using markdown spacing if helpful but do not use complex markdown that cannot render properly in a simple flex container.' },
+                                ...messages.map(({ role, content }) => ({ role, content })),
+                                userMsg
+                            ]
+                        })
+                    });
+
+                    const data = await res.json();
+
+                    if (!res.ok) throw new Error(data.error?.message || 'Failed to fetch');
+
+                    const botMsg = { role: 'assistant', content: data.choices[0].message.content };
+                    setMessages(prev => [...prev, botMsg]);
+                } catch (err) {
+                    setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${err.message}. Please check your API key or connection.` }]);
+                    if (err.message.includes('API')) setShowKeyPrompt(true);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="fixed bottom-6 right-24 z-50">
+                    {/* Chat Window */}
+                    {isOpen && (
+                        <div className="absolute bottom-16 right-0 w-[350px] h-[500px] bg-neutral-900 border border-white/10 shadow-2xl rounded-2xl flex flex-col overflow-hidden animate-[fade-in_0.2s_ease-out]">
+                            {/* Header */}
+                            <div className="px-4 py-3 bg-gradient-to-r from-primary-600 to-primary-500 flex justify-between items-center text-white shadow-md relative z-10">
+                                <div className="flex items-center gap-2">
+                                    <Icons.Sparkles className="w-5 h-5" />
+                                    <div>
+                                        <h3 className="font-semibold text-sm leading-tight">ResQHub AI</h3>
+                                        <p className="text-[10px] text-white/80 leading-tight">Emergency Assistant</p>
+                                    </div>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                    <button onClick={() => setIsOpen(false)} className="hover:bg-white/20 p-1 rounded-md transition-colors"><Icons.X /></button>
+                                </div>
+                            </div>
+
+                            {/* Messages */}
+                            <div className="flex-1 p-4 overflow-y-auto bg-neutral-950/50 space-y-4">
+                                        {messages.map((m, i) => (
+                                            <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                                <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm whitespace-pre-wrap ${m.role === 'user' ? 'bg-primary-600 text-white rounded-br-sm shadow-[0_2px_10px_rgba(37,99,235,0.2)]' : 'bg-neutral-800 text-neutral-200 border border-white/5 rounded-bl-sm dropdown-shadow shadow-black/20'}`}>
+                                                    {m.content}
+                                                </div>
+                                            </div>
+                                        ))}
+                                        {loading && (
+                                            <div className="flex justify-start">
+                                                <div className="max-w-[85%] rounded-2xl px-4 py-3 bg-neutral-800 border border-white/5 rounded-bl-sm flex gap-1.5 items-center">
+                                                    <div className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce"></div>
+                                                    <div className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '0.15s' }}></div>
+                                                    <div className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '0.3s' }}></div>
+                                                </div>
+                                            </div>
+                                        )}
+                                        <div ref={messagesEndRef} />
+                                    </div>
+
+                                    {/* Input Area */}
+                                    <form onSubmit={handleSend} className="p-3 bg-neutral-950 border-t border-white/5 flex gap-2">
+                                        <input type="text" value={input} onChange={e => setInput(e.target.value)} placeholder="Ask for emergency advice..." className="flex-1 bg-neutral-900 border border-white/10 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-primary-500 transition-colors" />
+                                        <button type="submit" disabled={!input.trim() || loading} className="p-2.5 bg-primary-600 hover:bg-primary-500 text-white rounded-xl disabled:opacity-50 transition-colors shadow-lg active:scale-95">
+                                            <svg className="w-4 h-4 transform rotate-90" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" /></svg>
+                                        </button>
+                                    </form>
+                        </div>
+                    )}
+
+                    {/* Toggle Button */}
+                    <div className="flex items-center gap-3 relative group">
+                        <div className={`absolute right-full mr-3 px-3 py-1.5 bg-neutral-900 border border-white/10 rounded-lg text-xs font-medium text-neutral-300 dropdown-shadow whitespace-nowrap transition-opacity duration-300 ${isHovered && !isOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                            AI Assistant
+                        </div>
+                        <button
+                            onClick={() => setIsOpen(!isOpen)}
+                            onMouseEnter={() => setIsHovered(true)}
+                            onMouseLeave={() => setIsHovered(false)}
+                            className={`relative flex items-center justify-center w-14 h-14 rounded-full transition-all duration-300 outline-none shadow-lg
+                                ${isOpen
+                                    ? 'bg-neutral-800 border border-white/20 text-white'
+                                    : 'bg-neutral-900 border border-white/10 hover:border-primary-500/50 hover:bg-neutral-800 text-primary-400 hover:scale-105 shadow-[0_4px_20px_rgba(0,0,0,0.5)]'
+                                }
+                            `}
+                        >
+                            {isOpen ? <Icons.X className="w-6 h-6" /> : <Icons.Sparkles className="w-6 h-6" />}
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        // 1. Sidebar Component
+        const Sidebar = ({ activeTab, setActiveTab, onLogout, user }) => {
+            const navItems = [
+                { id: 'dashboard', label: 'Dashboard', icon: Icons.Home },
+                { id: 'incidents', label: 'Incidents', icon: Icons.Briefcase },
+                { id: 'map', label: 'Live Map', icon: Icons.Map },
+                { id: 'team', label: 'Team Directory', icon: Icons.Users },
+                { id: 'admin', label: 'Admin', icon: Icons.Shield },
+                { id: 'settings', label: 'Settings', icon: Icons.Settings },
+            ];
+
+            return (
+                <aside className="w-64 flex-shrink-0 border-r border-white/5 bg-[#0a0a0a] hidden md:flex flex-col h-screen sticky top-0 z-10 transition-all">
+                    <div className="flex items-center px-6 h-14 border-b border-white/5">
+                        <Icons.Logo />
+                        <span className="ml-2 text-sm font-semibold tracking-tight text-white dark:text-white text-neutral-900">ResQHub</span>
+                        <span className="ml-2 px-1.5 py-0.5 rounded bg-white/10 text-[10px] font-medium text-neutral-400">v2.0</span>
+                    </div>
+
+                    <div className="px-4 py-6">
+                        <div className="text-xs font-medium text-neutral-500 mb-2 px-2">Main Menu</div>
+                        <nav className="flex flex-col gap-1">
+                            {navItems.map(item => (
+                                <button
+                                    key={item.id}
+                                    onClick={() => setActiveTab(item.id)}
+                                    className={`flex items-center px-2 py-2 rounded-lg transition-colors text-sm
+                                        ${activeTab === item.id
+                                            ? 'bg-white/10 text-white font-medium'
+                                            : 'text-neutral-400 hover:text-white hover:bg-white/5'
+                                        }`}
+                                >
+                                    <item.icon />
+                                    <span className="ml-3">{item.label}</span>
+                                </button>
+                            ))}
+                        </nav>
+                    </div>
+
+                    <div className="mt-auto p-4 mb-4">
+                        <div className="bg-neutral-900 border border-white/5 rounded-xl p-3 flex flex-col items-start gap-3">
+                            <div className="flex items-center gap-3 w-full">
+                                {user && user.photoURL ? (
+                                    <img src={user.photoURL} alt="Profile" className="w-8 h-8 rounded-full object-cover flex-shrink-0 border border-white/10" />
+                                ) : (
+                                    <div className="w-8 h-8 rounded-full bg-primary-600 flex items-center justify-center text-white font-medium text-xs flex-shrink-0">
+                                        {user && user.displayName ? user.displayName.substring(0, 2).toUpperCase() : 'U'}
+                                    </div>
+                                )}
+                                <div className="flex-1 overflow-hidden">
+                                    <div className="text-sm font-medium text-neutral-200 truncate">{user ? user.displayName : 'User'}</div>
+                                    <div className="text-xs text-neutral-500 truncate">Coordinator</div>
+                                </div>
+                            </div>
+                            <button onClick={onLogout} className="w-full text-left text-xs text-danger-400 font-medium hover:text-danger-300 transition-colors py-1 px-2 hover:bg-white/5 rounded">
+                                Sign Out
+                            </button>
+                        </div>
+                    </div>
+                </aside>
+            );
+        };
+
+        // 2. Notification Dropdown Component
+        const NotificationDropdown = ({ isOpen, onClose, notifications = [] }) => {
+            if (!isOpen) return null;
+
+            return (
+                <div className="absolute right-0 mt-2 w-80 bg-neutral-900 border border-white/10 rounded-xl dropdown-shadow z-50 overflow-hidden animate-[fade-in_0.15s_ease-out]">
+                    <div className="px-4 py-3 border-b border-white/5 flex justify-between items-center bg-neutral-950/50">
+                        <h3 className="text-sm font-medium text-white">Notifications</h3>
+                        <button className="text-xs text-primary-400 hover:text-primary-300">Mark all read</button>
+                    </div>
+                    <div className="max-h-80 overflow-y-auto">
+                        {notifications.length === 0 ? (
+                            <div className="p-6 text-center text-sm text-neutral-500">No new notifications</div>
+                        ) : (
+                            notifications.map(n => (
+                                <div key={n.id} className={`p-4 border-b border-white/5 hover:bg-white/5 cursor-pointer transition-colors ${n.unread ? 'bg-primary-500/5' : ''}`}>
+                                    <div className="flex justify-between items-start mb-1">
+                                        <span className={`text-sm font-medium text-white flex items-center gap-2 ${n.type === 'sos' ? 'text-danger-400' : n.type === 'warning' ? 'text-orange-400' : ''}`}>
+                                            {n.unread && <span className={`w-1.5 h-1.5 rounded-full ${n.type === 'sos' ? 'bg-danger-500' : 'bg-primary-500'}`}></span>}
+                                            {n.title}
+                                        </span>
+                                        <span className="text-xs text-neutral-500">Just now</span>
+                                    </div>
+                                    <p className="text-xs text-neutral-400 line-clamp-2">{n.body}</p>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                    <div className="p-2 bg-neutral-950/50 text-center border-t border-white/5">
+                        <button className="text-xs font-medium text-neutral-400 hover:text-white">View Inbox</button>
+                    </div>
+                </div>
+            );
+        };
+
+        // 3. Navbar Component
+        const Navbar = ({ activeTab, notifications = [] }) => {
+            const [isNotifOpen, setIsNotifOpen] = useState(false);
+            const unreadCount = notifications.filter(n => n.unread).length;
+
+            return (
+                <header className="h-14 glass-nav sticky top-0 z-40 px-6 flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-sm">
+                        <span className="text-neutral-500 font-medium hidden sm:inline">ResQHub</span>
+                        <Icons.ChevronRight className="text-neutral-600 hidden sm:inline" />
+                        <span className="text-neutral-200 font-medium capitalize">{activeTab}</span>
+                    </div>
+
+                    <div className="flex items-center gap-4">
+                        {/* Search Bar */}
+                        <div className="hidden md:flex items-center bg-neutral-900 border border-white/5 rounded-md px-3 py-1.5 text-sm w-64 focus-within:border-white/20 transition-colors">
+                            <Icons.Search className="text-neutral-500 mr-2" />
+                            <input
+                                type="text"
+                                placeholder="Search resources, alerts..."
+                                className="bg-transparent border-none outline-none text-neutral-200 placeholder-neutral-600 w-full"
+                            />
+                            <div className="flex items-center gap-1 border border-white/10 rounded px-1.5 py-0.5 text-[10px] text-neutral-500 ml-2">
+                                <span>⌘</span><span>K</span>
+                            </div>
+                        </div>
+
+                        {/* Notification Bell */}
+                        <div className="relative">
+                            <button
+                                onClick={() => setIsNotifOpen(!isNotifOpen)}
+                                className="p-1.5 text-neutral-400 hover:text-white rounded-md hover:bg-white/5 transition-colors relative"
+                            >
+                                <Icons.Bell />
+                                {unreadCount > 0 && <span className="absolute top-1 right-1.5 w-2 h-2 rounded-full bg-primary-500 border-2 border-[#0a0a0a]"></span>}
+                            </button>
+                            <NotificationDropdown isOpen={isNotifOpen} onClose={() => setIsNotifOpen(false)} notifications={notifications} />
+                        </div>
+                    </div>
+                </header>
+            );
+        };
+
+        // 4. Dashboard Card Component
+        const DashboardCard = ({ title, value, subIcon, subText, trend }) => (
+            <div className="card p-5 flex flex-col justify-between">
+                <div className="text-sm font-medium text-neutral-400 mb-2">{title}</div>
+                <div className="text-3xl font-semibold text-white mb-2">{value}</div>
+                <div className="flex items-center text-xs text-neutral-500">
+                    <span className={`font-medium mr-2 flex items-center gap-1 ${trend === 'up' ? 'text-primary-400' : trend === 'down' ? 'text-danger-400' : ''}`}>
+                        {subIcon} {subText}
+                    </span>
+                    <span>vs last 24h</span>
+                </div>
+            </div>
+        );
+
+        // 5. Emergency SOS Floating Button Component
+        const FloatingSOS = ({ onSOS }) => {
+            const [isHovered, setIsHovered] = useState(false);
+
+            return (
+                <div className="fixed bottom-6 right-6 z-50 flex items-center gap-3">
+                    {/* Tooltip hint */}
+                    <div className={`hidden sm:block px-3 py-1.5 bg-neutral-900 border border-white/10 rounded-lg text-xs font-medium text-neutral-300 dropdown-shadow transition-opacity duration-300 ${isHovered ? 'opacity-100' : 'opacity-0'}`}>
+                        Emergency Area?
+                    </div>
+
+                    <button
+                        onClick={onSOS}
+                        onMouseEnter={() => setIsHovered(true)}
+                        onMouseLeave={() => setIsHovered(false)}
+                        className={`relative flex items-center justify-center w-14 h-14 rounded-full transition-all duration-300 outline-none
+                            bg-gradient-to-tr from-danger-600 to-danger-500 shadow-lg hover:shadow-[0_0_20px_rgba(239,68,68,0.4)] hover:scale-105 border border-danger-400/50
+                        `}
+                    >
+                        <span className="text-white font-bold tracking-widest text-sm z-10 filter drop-shadow">SOS</span>
+                    </button>
+                </div>
+            );
+        };
+
+        const SOSConfirmationModal = ({ isOpen, onClose, onConfirm, loading }) => {
+            if (!isOpen) return null;
+
+            return (
+                <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[100] flex items-center justify-center p-4 animate-[fade-in_0.2s_ease-out]">
+                    <div className="bg-neutral-900 border border-danger-500/30 w-full max-w-sm rounded-2xl overflow-hidden shadow-[0_0_50px_rgba(220,38,38,0.15)] flex flex-col text-center p-8 relative">
+                        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-danger-600 via-danger-400 to-danger-600 animate-pulse"></div>
+
+                        <div className="mx-auto w-16 h-16 bg-danger-500/10 rounded-full flex items-center justify-center mb-4 border border-danger-500/20">
+                            <Icons.AlertTriangle className="w-8 h-8 text-danger-500" />
+                        </div>
+
+                        <h2 className="text-xl font-bold text-white mb-2">Initiate SOS?</h2>
+                        <p className="text-sm text-neutral-400 mb-6">
+                            This will instantly broadcast your GPS location to nearby users and emergency services. Only use in true emergencies.
+                        </p>
+
+                        <div className="flex flex-col gap-3">
+                            <button
+                                onClick={onConfirm}
+                                disabled={loading}
+                                className="w-full py-3.5 rounded-xl text-sm font-bold bg-danger-600 text-white hover:bg-danger-500 transition shadow-[0_4px_14px_0_rgba(220,38,38,0.39)] hover:shadow-[0_6px_20px_rgba(220,38,38,0.23)] hover:-translate-y-0.5 disabled:opacity-50 disabled:hover:translate-y-0 flex items-center justify-center"
+                            >
+                                {loading ? (
+                                    <><svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Broadcasting...</>
+                                ) : (
+                                    'YES, SEND SOS'
+                                )}
+                            </button>
+                            <button
+                                onClick={onClose}
+                                disabled={loading}
+                                className="w-full py-3 rounded-xl text-sm font-medium text-neutral-300 hover:bg-white/5 transition border border-transparent hover:border-white/10 disabled:opacity-50"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const CreateReportModal = ({ isOpen, onClose }) => {
+            if (!isOpen) return null;
+            const [loading, setLoading] = useState(false);
+            const [file, setFile] = useState(null);
+            const [preview, setPreview] = useState(null);
+            const [formData, setFormData] = useState({ severity: 'High', location: '', type: 'Disaster Report', description: '' });
+
+            const handleFile = (e) => {
+                const selected = e.target.files[0];
+                if (selected) {
+                    setFile(selected);
+                    const reader = new FileReader();
+                    reader.onloadend = () => setPreview(reader.result);
+                    reader.readAsDataURL(selected);
+                }
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setLoading(true);
+                try {
+                    let imageUrl = null;
+                    if (file) {
+                        imageUrl = await window.firebaseMock.uploadFile(file);
+                    }
+                    const res = await window.firebaseMock.createAlert({ ...formData, imageUrl });
+
+                    if (res._isOfflineQueued) {
+                        // Provide offline feedback
+                        alert("You are currently offline. Report saved locally and will sync automatically when connection is restored.");
+                    }
+                    
+                    setLoading(false);
+                    onClose();
+                } catch (err) {
+                    console.error(err);
+                    setLoading(false);
+                }
+            };
+
+        return (
+            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-[fade-in_0.2s_ease-out]">
+                <div className="bg-neutral-900 border border-white/10 w-full max-w-lg rounded-2xl overflow-hidden dropdown-shadow flex flex-col max-h-[90vh]">
+                    <div className="p-5 border-b border-white/5 flex justify-between items-center bg-neutral-950/50 shrink-0">
+                        <h2 className="text-lg font-medium text-white">Create Report</h2>
+                        <button onClick={onClose} className="p-1 text-neutral-400 hover:text-white rounded-md hover:bg-white/5 transition"><Icons.X /></button>
+                    </div>
+                    <form onSubmit={handleSubmit} className="p-5 overflow-y-auto space-y-4 flex-1">
+                        <div>
+                            <label className="block text-xs font-medium text-neutral-400 mb-1">Incident Type</label>
+                            <select className="w-full bg-neutral-950 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-primary-500" value={formData.type} onChange={e => setFormData({ ...formData, type: e.target.value })}>
+                                <option>Disaster Report</option>
+                                <option>Relief Supply Request</option>
+                                <option>Medical Emergency</option>
+                            </select>
+                        </div>
+                        <div className="flex gap-4">
+                            <div className="flex-1">
+                                <label className="block text-xs font-medium text-neutral-400 mb-1">Severity</label>
+                                <select className="w-full bg-neutral-950 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-primary-500" value={formData.severity} onChange={e => setFormData({ ...formData, severity: e.target.value })}>
+                                    <option>Low</option>
+                                    <option>High</option>
+                                    <option>Critical</option>
+                                </select>
+                            </div>
+                            <div className="flex-1">
+                                <label className="block text-xs font-medium text-neutral-400 mb-1">Location</label>
+                                <input required placeholder="Sector 7" className="w-full bg-neutral-950 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-primary-500" value={formData.location} onChange={e => setFormData({ ...formData, location: e.target.value })} />
+                            </div>
+                        </div>
+                        <div>
+                            <label className="block text-xs font-medium text-neutral-400 mb-1">Description</label>
+                            <textarea rows="3" placeholder="Provide details..." className="w-full bg-neutral-950 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-primary-500" value={formData.description} onChange={e => setFormData({ ...formData, description: e.target.value })}></textarea>
+                        </div>
+                        <div>
+                            <label className="block text-xs font-medium text-neutral-400 mb-1">Attach Media (Firebase Storage)</label>
+                            <div className="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-white/10 border-dashed rounded-xl hover:border-primary-500/50 transition-colors bg-neutral-950/50">
+                                {preview ? (
+                                    <div className="relative w-full rounded-lg overflow-hidden group">
+                                        <img src={preview} className="w-full max-h-48 object-cover" alt="Preview" />
+                                        <button type="button" onClick={() => { setFile(null); setPreview(null); }} className="absolute top-2 right-2 p-1.5 bg-black/60 rounded-full text-white opacity-0 group-hover:opacity-100 transition"><Icons.X /></button>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-1 text-center">
+                                        <Icons.Image className="mx-auto h-12 w-12 text-neutral-600" />
+                                        <div className="flex text-sm text-neutral-400 justify-center mt-2">
+                                            <label className="relative cursor-pointer rounded-md font-medium text-primary-400 hover:text-primary-300 focus-within:outline-none">
+                                                <span>Upload a file</span>
+                                                <input id="file-upload" name="file-upload" type="file" className="sr-only" accept="image/*" onChange={handleFile} />
+                                            </label>
+                                            <p className="pl-1">or drag and drop</p>
+                                        </div>
+                                        <p className="text-xs text-neutral-500 mt-1">PNG, JPG, GIF up to 5MB</p>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </form>
+                    <div className="p-5 border-t border-white/5 bg-neutral-950/50 flex justify-end gap-3 shrink-0">
+                        <button type="button" onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-medium text-neutral-300 hover:bg-white/5 transition">Cancel</button>
+                        <button onClick={handleSubmit} disabled={loading} className="px-4 py-2 rounded-lg text-sm font-medium bg-primary-600 text-white hover:bg-primary-500 transition disabled:opacity-50 flex items-center">
+                            {loading && <svg className="animate-spin h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>}
+                            {loading ? 'Uploading...' : 'Submit Report'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+                };
+
+        const LiveMap = ({ fullScreen = false, alerts = [] }) => {
+            const mapRef = useRef(null);
+            const [mapInstance, setMapInstance] = useState(null);
+
+            // Predefined resources (hospitals, shelters, petrol, relief)
+            const resources = [
+                { id: 'h1', type: 'hospital', name: 'City Med Center', lat: 34.0522, lng: -118.2437 },
+                { id: 'h2', type: 'hospital', name: 'Mercy Hospital', lat: 34.0450, lng: -118.2500 },
+                { id: 's1', type: 'shelter', name: 'Downtown Community Shelter', lat: 34.0500, lng: -118.2400 },
+                { id: 'p1', type: 'petrol', name: 'Express Fuel', lat: 34.0410, lng: -118.2480 },
+                { id: 'r1', type: 'relief', name: 'Red Cross Relief Point A', lat: 34.0600, lng: -118.2300 }
+            ];
+
+            // Ensure Leaflet is loaded
+            useEffect(() => {
+                if (!window.L || !mapRef.current) return;
+
+                // Initialize Map
+                const map = L.map(mapRef.current, {
+                    zoomControl: false // Custom position later
+                }).setView([34.0522, -118.2437], 13);
+
+                // Add Dark Tile Layer
+                L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+                    subdomains: 'abcd',
+                    maxZoom: 20
+                }).addTo(map);
+
+                L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+                // User Location Mock (Pulse effect)
+                const userIcon = L.divIcon({
+                    className: 'custom-div-icon',
+                    html: `<div style="width:16px;height:16px;background:#3b82f6;border-radius:50%;box-shadow:0 0 15px #3b82f6;border:2px solid #fff;position:relative;">
+                        <div style="position:absolute;inset:-4px;border-radius:50%;border:2px solid #3b82f6;animation:pulse-ring 2s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;"></div>
+                       </div>`,
+                    iconSize: [20, 20],
+                    iconAnchor: [10, 10]
+                });
+                L.marker([34.0522, -118.2437], { icon: userIcon }).addTo(map)
+                    .bindPopup(`<b>Your Location</b><br>Sector 4 Operations`);
+
+                // Add Resource Markers
+                const icons = {
+                    hospital: L.divIcon({ className: 'custom-div-icon', html: '<div style="width:12px;height:12px;background:#ef4444;border-radius:50%;border:1px solid #fff;"></div>', iconSize: [14, 14] }),
+                    shelter: L.divIcon({ className: 'custom-div-icon', html: '<div style="width:12px;height:12px;background:#22c55e;border-radius:50%;border:1px solid #fff;"></div>', iconSize: [14, 14] }),
+                    petrol: L.divIcon({ className: 'custom-div-icon', html: '<div style="width:12px;height:12px;background:#f59e0b;border-radius:50%;border:1px solid #fff;"></div>', iconSize: [14, 14] }),
+                    relief: L.divIcon({ className: 'custom-div-icon', html: '<div style="width:12px;height:12px;background:#8b5cf6;border-radius:50%;border:1px solid #fff;"></div>', iconSize: [14, 14] })
+                };
+
+                resources.forEach(res => {
+                    L.marker([res.lat, res.lng], { icon: icons[res.type] }).addTo(map)
+                        .bindPopup(`<b>${res.name}</b><br><span style="text-transform:capitalize;color:#888;font-size:11px;">${res.type} Area</span>`);
+                });
+
+                setMapInstance(map);
+
+                return () => {
+                    map.remove();
+                };
+            }, []);
+
+            // Dynamic Alerts Overlay Update
+            useEffect(() => {
+                if (!mapInstance || !alerts.length) return;
+
+                // Clear old alert markers manually or just add new ones for demo
+                alerts.filter(a => a.status === 'Active').forEach(alert => {
+                    // Mock coordinates around center
+                    const lat = 34.0522 + (Math.random() - 0.5) * 0.05;
+                    const lng = -118.2437 + (Math.random() - 0.5) * 0.05;
+
+                    const isCritical = alert.severity === 'Critical';
+                    const alertIcon = L.divIcon({
+                        className: 'custom-div-icon',
+                        html: `<div style="width:14px;height:14px;background:${isCritical ? '#dc2626' : '#f97316'};border-radius:50%;border:2px solid #fff;box-shadow:0 0 10px ${isCritical ? '#dc2626' : '#f97316'};"></div>`,
+                        iconSize: [18, 18],
+                    });
+
+                    L.marker([lat, lng], { icon: alertIcon }).addTo(mapInstance)
+                        .bindPopup(`<b>${alert.id}</b><br><span style="color:${isCritical ? '#ef4444' : '#f97316'}">${alert.severity}</span><br>${alert.location}`);
+                });
+            }, [alerts, mapInstance]);
+
+            return (
+                <div className={`relative w-full rounded-xl overflow-hidden border border-white/10 ${fullScreen ? 'h-full min-h-[500px]' : 'h-full min-h-[300px]'}`}>
+                    <div ref={mapRef} className="w-full h-full z-0"></div>
+                    {/* Custom Overlay Legend */}
+                    <div className="absolute bottom-4 left-4 z-10 bg-neutral-900/90 backdrop-blur-md border border-white/10 p-3 rounded-lg flex flex-col gap-2 shadow-lg w-48 animate-[fade-in_0.5s_ease-out]">
+                        <div className="text-xs font-semibold text-white mb-1">Map Legend</div>
+                        <div className="grid grid-cols-2 gap-2 text-[10px] text-neutral-300">
+                            <span className="flex items-center gap-1.5"><div className="w-2h-2 rounded-full bg-[#3b82f6] shadow-[0_0_5px_#3b82f6]"></div> You</span>
+                            <span className="flex items-center gap-1.5"><div className="w-2h-2 rounded-full bg-[#ef4444]"></div> Incident</span>
+                            <span className="flex items-center gap-1.5"><div className="w-2h-2 rounded-full bg-[#22c55e]"></div> Shelter</span>
+                            <span className="flex items-center gap-1.5"><div className="w-2h-2 rounded-full bg-[#ef4444] border hover:bg-white border-white"></div> Hospital</span>
+                            <span className="flex items-center gap-1.5"><div className="w-2h-2 rounded-full bg-[#f59e0b]"></div> Petrol</span>
+                            <span className="flex items-center gap-1.5"><div className="w-2h-2 rounded-full bg-[#8b5cf6]"></div> Relief</span>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // Dashboard Content Component
+        const Dashboard = () => {
+            const [alerts, setAlerts] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [isReportModalOpen, setIsReportModalOpen] = useState(false);
+
+            // Time formatter
+            const formatTimeAgo = (timestamp) => {
+                const diff = (Date.now() - timestamp) / 60000; // minutes
+                if (diff < 1) return 'Just now';
+                if (diff < 60) return `${Math.floor(diff)}m ago`;
+                return `${Math.floor(diff / 60)}h ago`;
+            };
+
+            useEffect(() => {
+                // Subscribe to real-time mock firestore data
+                const unsubscribe = window.firebaseMock.subscribeToAlerts((data) => {
+                    setAlerts(data);
+                    setLoading(false);
+                });
+                return () => unsubscribe();
+            }, []);
+
+            return (
+                <div className="p-6 max-w-6xl mx-auto space-y-6 animate-[fade-in_0.3s_ease]">
+                    <div className="flex justify-between items-center">
+                        <h1 className="text-xl font-semibold text-white">Overview</h1>
+                        <button onClick={() => setIsReportModalOpen(true)} className="flex items-center gap-2 px-3 py-1.5 bg-white text-black rounded-md text-sm font-medium hover:bg-neutral-200 transition-colors">
+                            <Icons.Plus /> Create Report
+                        </button>
+                    </div>
+
+                    <CreateReportModal isOpen={isReportModalOpen} onClose={() => setIsReportModalOpen(false)} />
+
+                    {/* KPI Grid */}
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <DashboardCard
+                            title="Active Incidents"
+                            value={alerts.filter(a => a.status === 'Active').length.toString()}
+                            trend="up"
+                            subText="+2"
+                            subIcon={<svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>}
+                        />
+                        <DashboardCard
+                            title="Deployed Resources"
+                            value="45"
+                            trend="up"
+                            subText="+12"
+                            subIcon={<svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" /></svg>}
+                        />
+                        <DashboardCard
+                            title="Safe Zones Assigned"
+                            value="8"
+                            trend="neutral"
+                            subText="0"
+                            subIcon={<svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14" /></svg>}
+                        />
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        {/* Recent Activity Table */}
+                        <div className="card lg:col-span-2 flex flex-col min-h-[400px]">
+                            <div className="p-5 border-b border-white/5 flex justify-between items-center">
+                                <div className="flex items-center gap-3">
+                                    <h2 className="text-sm font-medium text-white">Real-time Activity Feed</h2>
+                                    {!loading && <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>}
+                                </div>
+                                <button className="text-xs text-neutral-400 hover:text-white">View All</button>
+                            </div>
+                            <div className="p-0 overflow-hidden flex-1 flex flex-col">
+                                <table className="w-full text-sm text-left">
+                                    <thead className="text-xs text-neutral-500 bg-neutral-900/50">
+                                        <tr>
+                                            <th className="px-5 py-3 font-medium">Incident ID</th>
+                                            <th className="px-5 py-3 font-medium">Severity</th>
+                                            <th className="px-5 py-3 font-medium">Location</th>
+                                            <th className="px-5 py-3 font-medium">Status</th>
+                                            <th className="px-5 py-3 font-medium">Time</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-white/5 relative">
+                                        {loading ? (
+                                            <tr>
+                                                <td colSpan="5" className="text-center py-10 text-neutral-500">
+                                                    Loading Live Data...
+                                                </td>
+                                            </tr>
+                                        ) : (
+                                            alerts.slice(0, 6).map(row => (
+                                                <tr key={row.id} className="hover:bg-white/[0.02] transition-colors animate-[fade-in_0.3s_ease]">
+                                                    <td className="px-5 py-3 font-medium text-neutral-300">{row.id}</td>
+                                                    <td className="px-5 py-3">
+                                                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium border
+                                                            ${row.severity === 'Critical' ? 'bg-danger-500/10 text-danger-400 border-danger-500/20' :
+                                                                row.severity === 'High' ? 'bg-orange-500/10 text-orange-400 border-orange-500/20' :
+                                                                    'bg-neutral-500/10 text-neutral-400 border-neutral-500/20'}`}>
+                                                            {row.severity}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-5 py-3 text-neutral-400">{row.location}</td>
+                                                    <td className="px-5 py-3 text-neutral-400">
+                                                        <span className="flex items-center gap-1.5">
+                                                            {row.status === 'Active' && <span className="w-1.5 h-1.5 rounded-full bg-danger-500"></span>}
+                                                            {row.status}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-5 py-3 text-neutral-500 text-xs">{formatTimeAgo(row.timestamp)}</td>
+                                                </tr>
+                                            ))
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        {/* Mini Map/Status Widget */}
+                        <div className="card p-5 h-full min-h-[400px] flex flex-col relative">
+                            <h2 className="text-sm font-medium text-white mb-4 z-10">Live Map Snapshot</h2>
+                            <div className="flex-1 w-full relative">
+                                <LiveMap alerts={alerts} />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const AdminDashboard = () => {
+            const [activeTab, setActiveTab] = useState('founder');
+            const [broadcastMsg, setBroadcastMsg] = useState('');
+            const [alerts, setAlerts] = useState([]);
+            const [logins, setLogins] = useState([]);
+            
+            useEffect(() => {
+                const unsubscribe = window.firebaseMock.subscribeToAlerts(setAlerts);
+                window.firebaseMock.getUserLogins().then(setLogins);
+                return () => unsubscribe();
+            }, []);
+
+            const exportCSV = () => {
+                const headers = ['Name', 'Email', 'Login Time', 'Device', 'Location', 'IP Address'];
+                const rows = logins.map(l => [
+                    l.name,
+                    l.email,
+                    new Date(l.loginTime).toLocaleString(),
+                    l.device,
+                    l.location,
+                    l.ip
+                ]);
+
+                let csvContent = "data:text/csv;charset=utf-8," 
+                    + headers.join(",") + "\n"
+                    + rows.map(e => e.join(",")).join("\n");
+
+                const encodedUri = encodeURI(csvContent);
+                const link = document.createElement("a");
+                link.setAttribute("href", encodedUri);
+                link.setAttribute("download", `safelink_logins_${Date.now()}.csv`);
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            };
+
+            const handleBroadcast = (e) => {
+                e.preventDefault();
+                if(!broadcastMsg.trim()) return;
+                alert(`Broadcast Sent: ${broadcastMsg}\nUsers will receive a push notification shortly.`);
+                setBroadcastMsg('');
+            };
+
+            return (
+                <div className="p-6 max-w-6xl mx-auto space-y-6 animate-[fade-in_0.3s_ease]">
+                    <h1 className="text-xl font-semibold text-white flex items-center gap-2">
+                        <Icons.Shield className="w-6 h-6 text-primary-500" /> Admin Control Center
+                    </h1>
+                    
+                    {/* Tabs */}
+                    <div className="flex gap-4 border-b border-white/10 pb-4 overflow-x-auto">
+                        {[
+                            { id: 'founder', label: 'Founder Monitoring' },
+                            { id: 'broadcasts', label: 'Emergency Broadcasts' },
+                            { id: 'alerts', label: 'Disaster Alerts' },
+                            { id: 'resources', label: 'Shelters & Hospitals' },
+                            { id: 'sos-map', label: 'Active SOS Map' }
+                        ].map(tab => (
+                            <button 
+                                key={tab.id} 
+                                onClick={() => setActiveTab(tab.id)}
+                                className={`text-sm font-medium px-4 py-2 rounded-lg transition-colors whitespace-nowrap ${activeTab === tab.id ? 'bg-primary-600 text-white shadow-[0_0_15px_rgba(37,99,235,0.3)]' : 'text-neutral-400 hover:text-white hover:bg-white/5'}`}
+                            >
+                                {tab.label}
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* Founder Monitoring Tab */}
+                    {activeTab === 'founder' && (
+                        <div className="space-y-6">
+                            {/* Stats */}
+                            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                <DashboardCard title="Total Users" value="1" trend="up" subText="Active Demo" />
+                                <DashboardCard title="Total Logins" value={logins.length.toString()} trend="neutral" subText="Last 24h" />
+                                <DashboardCard title="Registered Contacts" value="1" trend="up" subText="Emergency" />
+                                <div className="bg-neutral-900 border border-white/5 rounded-xl p-5 flex flex-col justify-center gap-3">
+                                    <h3 className="text-sm font-medium text-neutral-400">Export Data</h3>
+                                    <button onClick={exportCSV} className="w-full py-2 bg-white/10 hover:bg-white/20 text-white rounded cursor-pointer transition-colors text-sm font-medium flex items-center justify-center gap-2">
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                                        Download CSV
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Login Activity Table */}
+                            <div className="card flex flex-col min-h-[400px]">
+                                <div className="p-5 border-b border-white/5">
+                                    <h2 className="text-sm font-medium text-white">Recent Login Activity</h2>
+                                </div>
+                                <div className="p-0 overflow-x-auto flex-1 flex flex-col">
+                                    <table className="w-full text-sm text-left">
+                                        <thead className="text-xs text-neutral-500 bg-neutral-900/50">
+                                            <tr>
+                                                <th className="px-5 py-3 font-medium">User Name</th>
+                                                <th className="px-5 py-3 font-medium">Email</th>
+                                                <th className="px-5 py-3 font-medium">Device</th>
+                                                <th className="px-5 py-3 font-medium">IP Addr</th>
+                                                <th className="px-5 py-3 font-medium">Time</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-white/5 relative">
+                                            {logins.map(login => (
+                                                <tr key={login.id} className="hover:bg-white/[0.02]">
+                                                    <td className="px-5 py-3 font-medium text-neutral-300">{login.name}</td>
+                                                    <td className="px-5 py-3 text-neutral-400">{login.email}</td>
+                                                    <td className="px-5 py-3 text-neutral-400 text-xs truncate max-w-[150px]" title={login.device}>{login.device}</td>
+                                                    <td className="px-5 py-3 text-neutral-400 text-xs">{login.ip}</td>
+                                                    <td className="px-5 py-3 text-neutral-500 text-xs">{new Date(login.loginTime).toLocaleString()}</td>
+                                                </tr>
+                                            ))}
+                                            {logins.length === 0 && (
+                                                <tr><td colSpan="5" className="px-5 py-8 text-center text-neutral-500">No login records found.</td></tr>
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Broadcasts Tab */}
+                    {activeTab === 'broadcasts' && (
+                        <div className="card p-6 md:p-8 relative overflow-hidden">
+                            <div className="absolute top-0 right-0 w-64 h-64 bg-danger-500/5 rounded-full blur-[80px] pointer-events-none"></div>
+                            <h2 className="text-lg font-medium text-white mb-2 relative z-10">Emergency Broadcast System</h2>
+                            <p className="text-sm text-neutral-400 mb-6 relative z-10">Send severe weather warnings, evacuation notices, or global alerts to all app users in the designated region.</p>
+                            <form onSubmit={handleBroadcast} className="space-y-4 max-w-2xl relative z-10">
+                                <div>
+                                    <label className="block text-xs font-medium text-neutral-400 mb-1">Broadcast Message</label>
+                                    <textarea rows="4" className="w-full bg-neutral-950 border border-white/10 rounded-lg px-4 py-3 text-white text-sm focus:outline-none focus:border-danger-500 transition-colors" value={broadcastMsg} onChange={e => setBroadcastMsg(e.target.value)} placeholder="Type emergency alert text..." required></textarea>
+                                </div>
+                                <div className="flex gap-4">
+                                    <div className="flex-1">
+                                        <label className="block text-xs font-medium text-neutral-400 mb-1">Target Region</label>
+                                        <select className="w-full bg-neutral-950 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-danger-500">
+                                            <option>All Sectors</option>
+                                            <option>Sector 1 - North</option>
+                                            <option>Sector 4 - Central</option>
+                                        </select>
+                                    </div>
+                                    <div className="flex-1">
+                                        <label className="block text-xs font-medium text-neutral-400 mb-1">Severity Level</label>
+                                        <select className="w-full bg-neutral-950 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-danger-500">
+                                            <option>Warning (Orange)</option>
+                                            <option>Critical (Red)</option>
+                                            <option>Informational (Blue)</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div className="pt-2">
+                                    <button type="submit" className="px-6 py-3 bg-danger-600 hover:bg-danger-500 text-white font-medium rounded-xl transition-all shadow-[0_4px_14px_0_rgba(220,38,38,0.39)] hover:shadow-[0_6px_20px_rgba(220,38,38,0.23)] flex items-center gap-2">
+                                        <Icons.Bell className="w-4 h-4" /> Send Broadcast
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    )}
+
+                    {/* Alerts Tab */}
+                    {activeTab === 'alerts' && (
+                        <div className="card p-6 min-h-[400px]">
+                             <div className="flex justify-between items-center mb-6">
+                                 <h2 className="text-lg font-medium text-white">Manage Disaster Alerts</h2>
+                                 <button className="px-3 py-1.5 bg-white text-black text-sm font-medium rounded hover:bg-neutral-200 transition-colors">Add Alert</button>
+                             </div>
+                             <div className="overflow-x-auto">
+                                 <table className="w-full text-sm text-left border-collapse">
+                                     <thead className="text-xs text-neutral-500 bg-neutral-900/50">
+                                         <tr>
+                                             <th className="px-4 py-3 font-medium rounded-tl-lg">ID</th>
+                                             <th className="px-4 py-3 font-medium">Type</th>
+                                             <th className="px-4 py-3 font-medium">Location</th>
+                                             <th className="px-4 py-3 font-medium">Severity</th>
+                                             <th className="px-4 py-3 font-medium">Status</th>
+                                             <th className="px-4 py-3 font-medium text-right rounded-tr-lg">Actions</th>
+                                         </tr>
+                                     </thead>
+                                     <tbody className="divide-y divide-white/5">
+                                         {alerts.map(a => (
+                                             <tr key={a.id} className="hover:bg-white/[0.02]">
+                                                 <td className="px-4 py-3 text-neutral-300">{a.id}</td>
+                                                 <td className="px-4 py-3 text-neutral-300">{a.type || 'Disaster Report'}</td>
+                                                 <td className="px-4 py-3 text-neutral-400">{a.location}</td>
+                                                 <td className="px-4 py-3">
+                                                     <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium border ${a.severity === 'Critical' ? 'bg-danger-500/10 text-danger-400 border-danger-500/20' : a.severity === 'High' ? 'bg-orange-500/10 text-orange-400 border-orange-500/20' : 'bg-neutral-500/10 text-neutral-400 border-neutral-500/20'}`}>{a.severity}</span>
+                                                 </td>
+                                                 <td className="px-4 py-3 text-neutral-400">{a.status}</td>
+                                                 <td className="px-4 py-3 text-right">
+                                                     <button className="text-primary-400 hover:text-primary-300 text-xs">Resolve</button>
+                                                 </td>
+                                             </tr>
+                                         ))}
+                                     </tbody>
+                                 </table>
+                             </div>
+                        </div>
+                    )}
+
+                    {/* Resources Tab */}
+                    {activeTab === 'resources' && (
+                        <div className="card p-6 min-h-[400px]">
+                            <div className="flex justify-between items-center mb-6">
+                                <h2 className="text-lg font-medium text-white">Shelters & Hospitals</h2>
+                                <button className="px-3 py-1.5 bg-primary-600 text-white text-sm font-medium rounded hover:bg-primary-500 transition-colors">Add Resource</button>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                {[
+                                    { name: 'City Med Center', type: 'Hospital', capacity: '80%', status: 'Active' },
+                                    { name: 'Downtown Community Shelter', type: 'Shelter', capacity: '45%', status: 'Active' },
+                                    { name: 'Red Cross Relief Point A', type: 'Relief', capacity: 'N/A', status: 'Active' },
+                                    { name: 'Mercy Hospital', type: 'Hospital', capacity: '95%', status: 'Critical' },
+                                ].map((res, i) => (
+                                    <div key={i} className="bg-neutral-900 border border-white/5 rounded-xl p-4 flex flex-col justify-between">
+                                        <div className="flex justify-between items-start mb-4">
+                                            <div>
+                                                <h3 className="text-white font-medium text-sm">{res.name}</h3>
+                                                <p className="text-xs text-neutral-500">{res.type}</p>
+                                            </div>
+                                            <span className={`px-2 py-0.5 rounded text-[10px] font-medium border ${res.type === 'Hospital' ? 'bg-danger-500/10 text-danger-400 border-danger-500/20' : res.type === 'Shelter' ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-purple-500/10 text-purple-400 border-purple-500/20'}`}>{res.type}</span>
+                                        </div>
+                                        <div className="flex justify-between items-end text-xs">
+                                            <div>
+                                                <span className="text-neutral-500 block">Capacity</span>
+                                                <span className={`font-medium ${res.capacity > '90%' ? 'text-orange-400' : 'text-neutral-300'}`}>{res.capacity}</span>
+                                            </div>
+                                            <button className="text-primary-400 hover:text-white transition-colors">Edit</button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* SOS Map Tab */}
+                    {activeTab === 'sos-map' && (
+                        <div className="card flex flex-col h-[600px] relative border-danger-500/30 overflow-hidden">
+                             <div className="absolute top-4 left-4 z-20 bg-black/60 backdrop-blur px-3 py-1.5 rounded border border-danger-500/50 flex items-center gap-2 pointer-events-none">
+                                 <div className="w-2 h-2 rounded-full bg-danger-500 animate-pulse"></div>
+                                 <span className="text-xs font-bold text-white tracking-widest leading-none">SOS TRACKER ACTIVE</span>
+                             </div>
+                             <div className="flex-1 w-full relative">
+                                 <LiveMap fullScreen={true} alerts={alerts} />
+                             </div>
+                             <div className="absolute inset-0 pointer-events-none border-[2px] border-danger-500/30 rounded-xl z-20 pulse-ring"></div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const ProfileSettings = ({ user, onUpdateUser }) => {
+            const [loading, setLoading] = useState(false);
+            const [preview, setPreview] = useState(user?.photoURL || null);
+            const [contacts, setContacts] = useState([]);
+            const [newContact, setNewContact] = useState({ contactName: '', relationship: '', phoneNumber: '' });
+            const [isAddingContact, setIsAddingContact] = useState(false);
+
+            useEffect(() => {
+                window.firebaseMock.getEmergencyContacts().then(setContacts);
+            }, []);
+
+            const handleAvatarUpload = async (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    setLoading(true);
+                    // Preview locally first
+                    const reader = new FileReader();
+                    reader.onloadend = () => setPreview(reader.result);
+                    reader.readAsDataURL(file);
+
+                    // Upload to Mock Firebase Storage
+                    try {
+                        const url = await window.firebaseMock.uploadFile(file);
+                        await window.firebaseMock.updateUserProfileImage(url);
+                        onUpdateUser({ ...user, photoURL: url });
+                    } catch (error) {
+                        console.error(error);
+                    } finally {
+                        setLoading(false);
+                    }
+                }
+            };
+
+            const handleAddContact = async (e) => {
+                e.preventDefault();
+                setLoading(true);
+                const added = await window.firebaseMock.addEmergencyContact(newContact);
+                setContacts(prev => [...prev, added]);
+                setNewContact({ contactName: '', relationship: '', phoneNumber: '' });
+                setIsAddingContact(false);
+                setLoading(false);
+            };
+
+            const handleRemoveContact = async (id) => {
+                await window.firebaseMock.deleteEmergencyContact(id);
+                setContacts(prev => prev.filter(c => c.id !== id));
+            };
+
+            return (
+                <div className="p-6 max-w-4xl mx-auto space-y-6 animate-[fade-in_0.3s_ease]">
+                    <h1 className="text-xl font-semibold text-white">Profile Settings</h1>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        {/* Profile Info Card */}
+                        <div className="card p-6 md:col-span-1 flex flex-col items-center gap-4 h-fit">
+                            <div className="relative group rounded-full overflow-hidden w-32 h-32 border-2 border-white/10 bg-neutral-900 flex items-center justify-center">
+                                {preview ? (
+                                    <img src={preview} alt="Profile" className="w-full h-full object-cover" />
+                                ) : (
+                                    <span className="text-4xl text-neutral-600 font-bold">{user?.displayName ? user.displayName.substring(0, 2).toUpperCase() : 'U'}</span>
+                                )}
+                                <label className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center cursor-pointer transition-opacity backdrop-blur-sm">
+                                    {loading ? (
+                                        <svg className="animate-spin h-6 w-6 text-white" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                    ) : (
+                                        <>
+                                            <Icons.Camera className="w-6 h-6 text-white mb-1" />
+                                            <span className="text-[10px] font-medium text-white">Update Avatar</span>
+                                        </>
+                                    )}
+                                    <input type="file" className="hidden" accept="image/*" onChange={handleAvatarUpload} disabled={loading} />
+                                </label>
+                            </div>
+                            <div className="text-center w-full">
+                                <h3 className="text-white font-medium truncate">{user?.displayName || 'User'}</h3>
+                                <p className="text-xs text-neutral-500 truncate">{user?.email}</p>
+                            </div>
+                        </div>
+
+                        <div className="md:col-span-2 space-y-6">
+                            {/* Personal Information */}
+                            <div className="card p-6">
+                                <h3 className="text-sm font-medium text-white mb-4">Personal Information</h3>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-xs text-neutral-500 mb-1">Full Name</label>
+                                        <input type="text" disabled value={user?.displayName || 'User'} className="w-full bg-neutral-950/50 border border-white/5 rounded-lg px-3 py-2 text-white text-sm opacity-50 cursor-not-allowed" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-neutral-500 mb-1">Email Address</label>
+                                        <input type="email" disabled value={user?.email || ''} className="w-full bg-neutral-950/50 border border-white/5 rounded-lg px-3 py-2 text-white text-sm opacity-50 cursor-not-allowed" />
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Emergency Contacts */}
+                            <div className="card p-6">
+                                <div className="flex justify-between items-center mb-4">
+                                    <div>
+                                        <h3 className="text-sm font-medium text-white">Emergency Contacts</h3>
+                                        <p className="text-xs text-neutral-500 mt-0.5">Notified automatically when SOS is triggered.</p>
+                                    </div>
+                                    <button onClick={() => setIsAddingContact(!isAddingContact)} className="px-3 py-1.5 bg-white/5 hover:bg-white/10 text-white rounded-md text-xs font-medium transition-colors border border-white/10 flex items-center gap-1">
+                                        {isAddingContact ? 'Cancel' : <><Icons.Plus /> Add</>}
+                                    </button>
+                                </div>
+
+                                {isAddingContact && (
+                                    <form onSubmit={handleAddContact} className="mb-6 p-4 bg-neutral-950/50 border border-white/5 rounded-lg space-y-3">
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                            <div>
+                                                <label className="block text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Contact Name</label>
+                                                <input required type="text" placeholder="John Doe" value={newContact.contactName} onChange={e => setNewContact({...newContact, contactName: e.target.value})} className="w-full bg-neutral-900 border border-white/10 rounded-md px-3 py-1.5 text-white text-sm focus:border-primary-500 focus:outline-none" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Relationship</label>
+                                                <input required type="text" placeholder="Parent, Spouse, etc." value={newContact.relationship} onChange={e => setNewContact({...newContact, relationship: e.target.value})} className="w-full bg-neutral-900 border border-white/10 rounded-md px-3 py-1.5 text-white text-sm focus:border-primary-500 focus:outline-none" />
+                                            </div>
+                                            <div className="sm:col-span-2">
+                                                <label className="block text-[10px] text-neutral-500 uppercase tracking-wider mb-1">Phone Number</label>
+                                                <input required type="tel" placeholder="+1 (555) 000-0000" value={newContact.phoneNumber} onChange={e => setNewContact({...newContact, phoneNumber: e.target.value})} className="w-full bg-neutral-900 border border-white/10 rounded-md px-3 py-1.5 text-white text-sm focus:border-primary-500 focus:outline-none" />
+                                            </div>
+                                        </div>
+                                        <button type="submit" disabled={loading} className="w-full py-2 bg-primary-600 hover:bg-primary-500 text-white text-sm font-medium rounded-md transition-colors shadow-lg shadow-primary-500/20 disabled:opacity-50 mt-2">
+                                            Save Contact
+                                        </button>
+                                    </form>
+                                )}
+
+                                <div className="space-y-2">
+                                    {contacts.length === 0 ? (
+                                        <div className="text-center py-6 text-sm text-neutral-500 bg-neutral-950/30 rounded-lg border border-white/5 border-dashed">No emergency contacts registered.</div>
+                                    ) : (
+                                        contacts.map(c => (
+                                            <div key={c.id} className="flex items-center justify-between p-3 bg-neutral-950/50 border border-white/5 rounded-lg hover:border-white/10 transition-colors">
+                                                <div>
+                                                    <div className="text-sm font-medium text-white flex items-center gap-2">
+                                                        {c.contactName} <span className="px-1.5 py-0.5 rounded bg-primary-500/10 text-primary-400 text-[10px] uppercase tracking-wider">{c.relationship}</span>
+                                                    </div>
+                                                    <div className="text-xs text-neutral-500 mt-0.5">{c.phoneNumber}</div>
+                                                </div>
+                                                <button onClick={() => handleRemoveContact(c.id)} className="p-1.5 text-neutral-500 hover:text-danger-400 hover:bg-danger-500/10 rounded transition-colors" title="Remove Contact">
+                                                    <Icons.X />
+                                                </button>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [user, setUser] = useState(null);
+            const [activeTab, setActiveTab] = useState('dashboard');
+
+            // Setup State
+            const [needsSetup, setNeedsSetup] = useState(true);
+            const [setupData, setSetupData] = useState({ apiKey: '', authDomain: '', projectId: '', storageBucket: '', messagingSenderId: '', appId: '', openAiKey: '' });
+
+            useEffect(() => {
+                const configStr = localStorage.getItem('safelink_config');
+                window.openAiKey = localStorage.getItem('safelink_openai') || '';
+                if(configStr) {
+                    try {
+                        const config = JSON.parse(configStr);
+                        window.initFirebase(config);
+                        setNeedsSetup(false);
+                        window.FirebaseSDK.onAuthStateChanged(window.auth, (u) => {
+                            if(u) setUser({ email: u.email, displayName: u.displayName, uid: u.uid, photoURL: u.photoURL });
+                            else setUser(null);
+                        });
+                    } catch(e) { console.error(e); }
+                }
+            }, []);
+
+            const handleSetup = (e) => {
+                e.preventDefault();
+                try {
+                    const fbConfig = { apiKey: setupData.apiKey, authDomain: setupData.authDomain, projectId: setupData.projectId, storageBucket: setupData.storageBucket, messagingSenderId: setupData.messagingSenderId, appId: setupData.appId };
+                    localStorage.setItem('safelink_config', JSON.stringify(fbConfig));
+                    localStorage.setItem('safelink_openai', setupData.openAiKey);
+                    window.openAiKey = setupData.openAiKey;
+                    window.initFirebase(fbConfig);
+                    setNeedsSetup(false);
+                    window.FirebaseSDK.onAuthStateChanged(window.auth, (u) => {
+                        if(u) setUser({ email: u.email, displayName: u.displayName, uid: u.uid, photoURL: u.photoURL });
+                    });
+                } catch(err) {
+                    alert('Configuration Error: ' + err.message);
+                    localStorage.removeItem('safelink_config');
+                }
+            };
+
+            // Global connectivity state
+            const [isOnline, setIsOnline] = useState(navigator.onLine);
+            const [isSyncing, setIsSyncing] = useState(false);
+
+            // SOS State
+            const [isSOSModalOpen, setIsSOSModalOpen] = useState(false);
+            const [sosLoading, setSosLoading] = useState(false);
+            const [toastMsg, setToastMsg] = useState('');
+
+            const showToast = (msg) => {
+                setToastMsg(msg);
+                setTimeout(() => setToastMsg(''), 5000);
+            };
+
+            // Setup Online/Offline listeners
+            useEffect(() => {
+                const handleOnline = async () => {
+                    setIsOnline(true);
+
+                    // Trigger sync when reconnected
+                    const queuedItems = JSON.parse(localStorage.getItem('safelink_offline_queue') || '[]');
+                    if (queuedItems.length > 0) {
+                        setIsSyncing(true);
+                        try {
+                            const syncedCount = await window.firebaseMock.syncOfflineQueue();
+                            setIsSyncing(false);
+                            showToast(`Connection restored. Synced ${syncedCount} offline alerts.`);
+                        } catch (e) {
+                            console.error("Sync failed", e);
+                            setIsSyncing(false);
+                        }
+                    } else {
+                        showToast('Connection restored.');
+                    }
+                };
+
+                const handleOffline = () => {
+                    setIsOnline(false);
+                    showToast('You are offline. Reports will be saved locally.');
+                };
+
+                window.addEventListener('online', handleOnline);
+                window.addEventListener('offline', handleOffline);
+
+                return () => {
+                    window.removeEventListener('online', handleOnline);
+                    window.removeEventListener('offline', handleOffline);
+                };
+            }, []);
+
+            const triggerSOS = async () => {
+                setSosLoading(true);
+
+                try {
+                    // Try to get actual coordinates, fallback to mock if denied/unavailable
+                    const coords = await new Promise((resolve, reject) => {
+                        if (navigator.geolocation && isOnline) { // Avoid long timeout if offline
+                            navigator.geolocation.getCurrentPosition(
+                                (pos) => resolve(`${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)}`),
+                                (err) => resolve('Sector 4 Operations (Fallback Location)') // fallback on error for demo
+                            );
+                        } else {
+                            resolve('Sector 4 Operations (Fallback Location)');
+                        }
+                    });
+
+                    // Create critical incident
+                    const result = await window.firebaseMock.createAlert({
+                        type: 'SOS Emergency',
+                        severity: 'Critical',
+                        location: coords,
+                        description: 'Immediate assistance required! User triggered SOS.',
+                    });
+
+                    // Alert Emergency Contacts (Simulation)
+                    if (isOnline) {
+                        const contacts = await window.firebaseMock.getEmergencyContacts();
+                        if (contacts.length > 0) {
+                            console.log(`[Cloud Function Triggered] Sending SMS to ${contacts.length} emergency contacts.`);
+                            contacts.forEach(c => {
+                                console.log(`SMS Dispatched -> ${c.phoneNumber}: "Emergency Alert from SafeLink. ${user?.displayName || 'User'} may be in danger. Location: https://maps.google.com/?q=${coords.replace(' ', '')}"`);
+                            });
+                        }
+                    }
+
+                    if (result._isOfflineQueued) {
+                        showToast('You are offline. SOS Alert queued locally for later sync.');
+                    } else {
+                        showToast('SOS Broadcasted successfully. Nearby users, authorities, & contacts notified.');
+                    }
+                } catch (e) {
+                    console.error('SOS Failed', e);
+                    showToast('Error broadcasting SOS.');
+                } finally {
+                    setSosLoading(false);
+                    setIsSOSModalOpen(false);
+                }
+            };
+
+            // Push Notification State
+            const [notifications, setNotifications] = useState([]);
+            const [showPushContent, setShowPushContent] = useState(null);
+
+            useEffect(() => {
+                // Request Permission (Mock)
+                window.firebaseMock.requestNotificationPermission().then(status => {
+                    if (status === 'granted') {
+                        // Subscribe to Mock FCM
+                        const unsubscribe = window.firebaseMock.subscribeToNotifications((notif) => {
+                            setNotifications(prev => [notif, ...prev]);
+
+                            // Native browser notification if supported and page isn't active
+                            if (Notification.permission === "granted" && document.visibilityState !== "visible") {
+                                new Notification(notif.title, { body: notif.body });
+                            }
+
+                            // App UI Push Toast
+                            setShowPushContent(notif);
+                            setTimeout(() => setShowPushContent(null), 8000); // Hide after 8s
+                        });
+                        return () => unsubscribe();
+                    }
+                });
+            }, []);
+
+            useEffect(() => {
+                const style = document.createElement('style');
+                style.innerHTML = `
+                    @keyframes fade-in {
+                        from { opacity: 0; transform: translateY(4px); }
+                        to { opacity: 1; transform: translateY(0); }
+                    }
+                    @keyframes slide-up {
+                        from { opacity: 0; bottom: 1rem; }
+                        to { opacity: 1; bottom: 2rem; }
+                    }
+                    @keyframes slide-down {
+                        from { opacity: 0; top: -1rem; }
+                        to { opacity: 1; top: 1.5rem; }
+                    }
+                `;
+                document.head.appendChild(style);
+                return () => document.head.removeChild(style);
+            }, []);
+
+            if (needsSetup) {
+                return (
+                    <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center p-4">
+                        <div className="bg-neutral-900 border border-white/10 rounded-2xl p-8 max-w-lg w-full shadow-2xl relative overflow-hidden">
+                            <div className="absolute top-0 right-0 w-64 h-64 bg-primary-500/10 rounded-full blur-[80px] pointer-events-none"></div>
+                            <h2 className="text-2xl font-bold text-white mb-2 relative z-10 flex items-center gap-2"><Icons.Shield className="text-primary-500" /> Live Production Setup</h2>
+                            <p className="text-sm text-neutral-400 mb-6 relative z-10">SafeLink has been upgraded directly to use real Firebase and OpenAI. Please enter your project keys to initialize the application.</p>
+                            <form onSubmit={handleSetup} className="space-y-4 relative z-10">
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="col-span-2"><label className="block text-xs font-medium text-neutral-500 mb-1">API Key</label><input required type="password" className="w-full bg-neutral-950 border border-white/10 rounded-lg px-3 py-2 text-white text-sm focus:border-primary-500 focus:outline-none transition-colors" value={setupData.apiKey} onChange={e=>setSetupData({...setupData, apiKey: e.target.value})} placeholder="AIzaSy..." /></div>
+                                    <div className="col-span-2 sm:col-span-1"><label className="block text-xs font-medium text-neutral-500 mb-1">Auth Domain</label><input required className="w-full bg-neutral-950 border border-white/10 rounded-lg px-3 py-2 text-white text-sm focus:border-primary-500 focus:outline-none transition-colors" value={setupData.authDomain} onChange={e=>setSetupData({...setupData, authDomain: e.target.value})} placeholder="app.firebaseapp.com" /></div>
+                                    <div className="col-span-2 sm:col-span-1"><label className="block text-xs font-medium text-neutral-500 mb-1">Project ID</label><input required className="w-full bg-neutral-950 border border-white/10 rounded-lg px-3 py-2 text-white text-sm focus:border-primary-500 focus:outline-none transition-colors" value={setupData.projectId} onChange={e=>setSetupData({...setupData, projectId: e.target.value})} placeholder="my-project-id" /></div>
+                                    <div className="col-span-2 sm:col-span-1"><label className="block text-xs font-medium text-neutral-500 mb-1">Storage Bucket</label><input required className="w-full bg-neutral-950 border border-white/10 rounded-lg px-3 py-2 text-white text-sm focus:border-primary-500 focus:outline-none transition-colors" value={setupData.storageBucket} onChange={e=>setSetupData({...setupData, storageBucket: e.target.value})} placeholder="app.appspot.com" /></div>
+                                    <div className="col-span-2 sm:col-span-1"><label className="block text-xs font-medium text-neutral-500 mb-1">Messaging Sender ID</label><input required className="w-full bg-neutral-950 border border-white/10 rounded-lg px-3 py-2 text-white text-sm focus:border-primary-500 focus:outline-none transition-colors" value={setupData.messagingSenderId} onChange={e=>setSetupData({...setupData, messagingSenderId: e.target.value})} placeholder="1234567890" /></div>
+                                    <div className="col-span-2"><label className="block text-xs font-medium text-neutral-500 mb-1">App ID</label><input required className="w-full bg-neutral-950 border border-white/10 rounded-lg px-3 py-2 text-white text-sm focus:border-primary-500 focus:outline-none transition-colors" value={setupData.appId} onChange={e=>setSetupData({...setupData, appId: e.target.value})} placeholder="1:123:web:abc" /></div>
+                                </div>
+                                <div className="pt-6 border-t border-white/10 mt-6">
+                                    <label className="block text-xs font-medium text-neutral-500 mb-1 flex justify-between"><span>OpenAI API Key <span className="text-primary-500/70">(Used for AI Assistant)</span></span></label>
+                                    <input required type="password" className="w-full bg-neutral-950 border border-white/10 rounded-lg px-3 py-2 text-white text-sm focus:border-primary-500 focus:outline-none transition-colors" value={setupData.openAiKey} onChange={e=>setSetupData({...setupData, openAiKey: e.target.value})} placeholder="sk-..." />
+                                </div>
+                                <button type="submit" className="w-full py-3 mt-6 bg-primary-600 hover:bg-primary-500 text-white font-medium rounded-lg transition-colors shadow-lg shadow-primary-500/20">Initialize SafeLink Core</button>
+                            </form>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (!user) {
+                return <AuthScreen onLogin={setUser} />;
+            }
+
+            return (
+                <div className="flex min-h-screen bg-[#0a0a0a] text-neutral-200">
+                    <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} onLogout={() => setUser(null)} user={user} />
+
+                    <div className="flex-1 flex flex-col min-w-0 relative">
+                        {/* Global Push Notification Toast */}
+                        {showPushContent && (
+                            <div className="fixed top-6 right-6 z-[200] w-80 bg-neutral-900 border border-white/10 rounded-xl shadow-2xl p-4 flex gap-3 animate-[slide-down_0.4s_ease-out]">
+                                <div className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center border
+                                    ${showPushContent.type === 'sos' ? 'bg-danger-500/10 border-danger-500/20 text-danger-500' :
+                                        showPushContent.type === 'warning' ? 'bg-orange-500/10 border-orange-500/20 text-orange-500' :
+                                            'bg-primary-500/10 border-primary-500/20 text-primary-500'}`}
+                                >
+                                    {showPushContent.type === 'sos' ? <Icons.AlertTriangle className="w-5 h-5" /> : <Icons.Bell className="w-5 h-5" />}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <div className="flex justify-between items-start">
+                                        <p className="text-sm font-semibold text-white truncate">{showPushContent.title}</p>
+                                        <button onClick={() => setShowPushContent(null)} className="text-neutral-500 hover:text-white"><Icons.X /></button>
+                                    </div>
+                                    <p className="text-xs text-neutral-400 mt-0.5 line-clamp-2">{showPushContent.body}</p>
+                                </div>
+                            </div>
+                        )}
+
+                        <Navbar activeTab={activeTab} user={user} notifications={notifications} />
+
+                        {/* Offline Banner */}
+                        {!isOnline && (
+                            <div className="bg-orange-500/10 border-b border-orange-500/20 px-4 py-2 flex items-center justify-center gap-2 z-30">
+                                <Icons.AlertTriangle className="w-4 h-4 text-orange-400" />
+                                <span className="text-xs font-medium text-orange-400">Offline Mode. Actions are cached locally and will sync when reconnected.</span>
+                            </div>
+                        )}
+                        {isSyncing && (
+                            <div className="bg-primary-500/10 border-b border-primary-500/20 px-4 py-2 flex items-center justify-center gap-2 z-30">
+                                <svg className="animate-spin h-3.5 w-3.5 text-primary-400" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                <span className="text-xs font-medium text-primary-400">Syncing offline data...</span>
+                            </div>
+                        )}
+
+                        <main className="flex-1 relative pb-20 md:pb-0 overflow-y-auto w-full">
+                            {/* Subtle background glow */}
+                            <div className="fixed top-0 left-1/2 -translate-x-1/2 w-[800px] h-[400px] bg-primary-500/5 rounded-full blur-[100px] pointer-events-none -z-10"></div>
+
+                            {activeTab === 'dashboard' ? (
+                                <Dashboard />
+                            ) : activeTab === 'settings' ? (
+                                <ProfileSettings user={user} onUpdateUser={setUser} />
+                            ) : activeTab === 'map' ? (
+                                <div className="p-6 h-[calc(100vh-3.5rem)] animate-[fade-in_0.3s_ease]">
+                                    <div className="flex justify-between items-center mb-4">
+                                        <h1 className="text-xl font-semibold text-white">Live Disasters Map</h1>
+                                    </div>
+                                    <LiveMap fullScreen={true} alerts={[]} />
+                                </div>
+                            ) : activeTab === 'admin' ? (
+                                <AdminDashboard />
+                            ) : (
+                                <div className="p-8 flex items-center justify-center h-full animate-[fade-in_0.3s_ease]">
+                                    <div className="text-center">
+                                        <div className="inline-block p-4 rounded-full bg-neutral-900 text-neutral-500 mb-4 border border-white/5">
+                                            <Icons.Settings className="w-6 h-6" />
+                                        </div>
+                                        <h2 className="text-lg font-medium text-white capitalize">{activeTab} Viewer</h2>
+                                        <p className="text-sm text-neutral-500 mt-2">Module pending integration.</p>
+                                    </div>
+                                </div>
+                            )}
+                        </main>
+
+                        {/* Toast Notification */}
+                        {toastMsg && (
+                            <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-[150] px-4 py-3 bg-neutral-900 border border-white/10 rounded-xl shadow-2xl flex items-center gap-3 animate-[slide-up_0.3s_ease-out]">
+                                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                                <span className="text-sm font-medium text-white">{toastMsg}</span>
+                            </div>
+                        )}
+                    </div>
+
+                    <AIChatbot />
+                    <FloatingSOS onSOS={() => setIsSOSModalOpen(true)} />
+                    <SOSConfirmationModal isOpen={isSOSModalOpen} onClose={() => setIsSOSModalOpen(false)} onConfirm={triggerSOS} loading={sosLoading} />
+                </div>
+            );
+        };
+
+        const AuthScreen = ({ onLogin }) => {
+            const [isRegister, setIsRegister] = useState(false);
+            const [email, setEmail] = useState('');
+            const [password, setPassword] = useState('');
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setLoading(true);
+                setError('');
+                try {
+                    // Using mock firebase auth for UI demonstration
+                    const res = await window.firebaseMock.login(email, password);
+                    onLogin(res.user);
+                } catch (err) {
+                    setError('Authentication failed. Please check credentials.');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleGoogleLogin = async () => {
+                setLoading(true);
+                try {
+                    const res = await window.firebaseMock.googleLogin();
+                    onLogin(res.user);
+                } catch (err) {
+                    setError('Google login failed.');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="min-h-screen bg-[#0a0a0a] flex flex-col items-center justify-center p-4 relative overflow-hidden">
+                    {/* Background glow */}
+                    <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-primary-500/10 rounded-full blur-[120px] pointer-events-none"></div>
+
+                    <div className="w-full max-w-md bg-neutral-900/80 backdrop-blur-xl border border-white/10 p-8 rounded-2xl dropdown-shadow animate-[fade-in_0.5s_ease-out] z-10">
+                        <div className="flex items-center justify-center mb-8">
+                            <Icons.Logo />
+                            <span className="ml-2 text-2xl font-bold tracking-tight text-white">SafeLink</span>
+                        </div>
+
+                        <h2 className="text-xl font-semibold text-white mb-2 text-center">
+                            {isRegister ? 'Create an account' : 'Welcome back'}
+                        </h2>
+                        <p className="text-sm text-neutral-400 mb-6 text-center">
+                            {isRegister ? 'Enter your details to register.' : 'Enter your credentials to access the dashboard.'}
+                        </p>
+
+                        {error && <div className="mb-4 p-3 bg-danger-500/10 border border-danger-500/20 rounded-lg text-danger-400 text-sm text-center">{error}</div>}
+
+                        <form onSubmit={handleSubmit} className="space-y-4">
+                            <div>
+                                <label className="block text-xs font-medium text-neutral-400 mb-1">Email Address</label>
+                                <input
+                                    type="email"
+                                    required
+                                    value={email}
+                                    onChange={(e) => setEmail(e.target.value)}
+                                    className="w-full bg-neutral-950 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-primary-500 transition-colors"
+                                    placeholder="name@example.com"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-medium text-neutral-400 mb-1">Password</label>
+                                <input
+                                    type="password"
+                                    required
+                                    value={password}
+                                    onChange={(e) => setPassword(e.target.value)}
+                                    className="w-full bg-neutral-950 border border-white/10 rounded-lg px-4 py-2.5 text-white text-sm focus:outline-none focus:border-primary-500 transition-colors"
+                                    placeholder="••••••••"
+                                />
+                            </div>
+
+                            <button
+                                type="submit"
+                                disabled={loading}
+                                className="w-full bg-white text-black font-semibold rounded-lg px-4 py-2.5 text-sm hover:bg-neutral-200 transition-colors disabled:opacity-50 flex justify-center items-center"
+                            >
+                                {loading ? (
+                                    <svg className="animate-spin h-4 w-4 text-black" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                ) : (
+                                    isRegister ? 'Sign Up' : 'Sign In'
+                                )}
+                            </button>
+                        </form>
+
+                        <div className="mt-6">
+                            <div className="relative">
+                                <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-white/10"></div></div>
+                                <div className="relative flex justify-center text-xs"><span className="bg-neutral-900 px-2 text-neutral-500">Or continue with</span></div>
+                            </div>
+
+                            <button
+                                onClick={handleGoogleLogin}
+                                disabled={loading}
+                                className="mt-4 w-full bg-neutral-950 border border-white/10 text-white font-medium rounded-lg px-4 py-2.5 text-sm hover:bg-white/5 transition-colors flex items-center justify-center gap-2"
+                            >
+                                <svg className="w-4 h-4" viewBox="0 0 24 24"><path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" /><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" /><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" /><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" /></svg>
+                                Google
+                            </button>
+                        </div>
+
+                        <p className="mt-6 text-center text-xs text-neutral-500">
+                            {isRegister ? 'Already have an account?' : "Don't have an account?"}
+                            <button onClick={() => setIsRegister(!isRegister)} className="ml-1 text-primary-400 hover:text-primary-300 font-medium">
+                                {isRegister ? 'Sign in' : 'Sign up'}
+                            </button>
+                        </p>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+
+</html>
